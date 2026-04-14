@@ -1,29 +1,23 @@
 /**
  * Embedding Service
- * Ported from production Ruby implementation (embedding_service.rb, 190 LOC)
- *
- * OpenAI text-embedding-3-large at 1536 dimensions.
+ * Voyage AI voyage-3-large at 1536 dimensions.
  * Retry with exponential backoff (4s base, 120s cap, 5 retries).
  * 8000 character input truncation.
  */
 
-import OpenAI from 'openai';
-
-const MODEL = 'text-embedding-3-large';
-const DIMENSIONS = 1536;
+const MODEL = 'voyage-3-large';
+const DIMENSIONS = 1024;
 const MAX_CHARS = 8000;
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 4000;
 const MAX_DELAY_MS = 120000;
-const BATCH_SIZE = 100;
+const BATCH_SIZE = 10;
+const VOYAGE_API_URL = 'https://api.voyageai.com/v1/embeddings';
 
-let client: OpenAI | null = null;
-
-function getClient(): OpenAI {
-  if (!client) {
-    client = new OpenAI();
-  }
-  return client;
+function getApiKey(): string {
+  const key = process.env.VOYAGE_API_KEY;
+  if (!key) throw new Error('VOYAGE_API_KEY environment variable is required');
+  return key;
 }
 
 export async function embed(text: string): Promise<Float32Array> {
@@ -49,14 +43,39 @@ export async function embedBatch(texts: string[]): Promise<Float32Array[]> {
 async function embedBatchWithRetry(texts: string[]): Promise<Float32Array[]> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const response = await getClient().embeddings.create({
-        model: MODEL,
-        input: texts,
-        dimensions: DIMENSIONS,
+      const response = await fetch(VOYAGE_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${getApiKey()}`,
+        },
+        body: JSON.stringify({
+          input: texts,
+          model: MODEL,
+          input_type: 'document',
+          output_dimension: DIMENSIONS,
+        }),
       });
 
+      if (!response.ok) {
+        const status = response.status;
+        const body = await response.text();
+        if (status === 429) {
+          const retryAfter = response.headers.get('retry-after');
+          const err = new Error(`Voyage rate limit: ${body}`) as any;
+          err.status = 429;
+          err.retryAfter = retryAfter;
+          throw err;
+        }
+        throw new Error(`Voyage API error ${status}: ${body}`);
+      }
+
+      const json = await response.json() as {
+        data: Array<{ index: number; embedding: number[] }>;
+      };
+
       // Sort by index to maintain order
-      const sorted = response.data.sort((a, b) => a.index - b.index);
+      const sorted = json.data.sort((a, b) => a.index - b.index);
       return sorted.map(d => new Float32Array(d.embedding));
     } catch (e: unknown) {
       if (attempt === MAX_RETRIES - 1) throw e;
@@ -64,8 +83,8 @@ async function embedBatchWithRetry(texts: string[]): Promise<Float32Array[]> {
       // Check for rate limit with Retry-After header
       let delay = exponentialDelay(attempt);
 
-      if (e instanceof OpenAI.APIError && e.status === 429) {
-        const retryAfter = e.headers?.['retry-after'];
+      if (typeof e === 'object' && e !== null && 'status' in e && (e as any).status === 429) {
+        const retryAfter = (e as any).retryAfter;
         if (retryAfter) {
           const parsed = parseInt(retryAfter, 10);
           if (!isNaN(parsed)) {
