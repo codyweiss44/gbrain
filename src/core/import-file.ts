@@ -156,7 +156,7 @@ export async function reconcileWikilinks(
   if (refs.length > 0) {
     const index = slugIndex ?? ((await tx.listPages()) ?? []).map((p) => p.slug);
     for (const ref of refs) {
-      const resolved = await resolveWikilinkTarget(tx, ref.target, index);
+      const resolved = await resolveWikilinkTarget(tx, ref.target, index, slug);
       if (!resolved || resolved === slug) continue;
       if (!desired.has(resolved)) {
         desired.set(resolved, ref.display ?? ref.anchor ?? '');

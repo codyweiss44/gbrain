@@ -59,7 +59,7 @@ for (const page of allPages) {
 
   let resolvedCount = 0;
   for (const ref of refs) {
-    const resolved = await resolveWikilinkTarget(engine, ref.target, slugIndex);
+    const resolved = await resolveWikilinkTarget(engine, ref.target, slugIndex, page.slug);
     if (resolved === page.slug) {
       totalSelf++;
       continue;

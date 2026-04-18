@@ -81,6 +81,13 @@ describe('extractWikilinks', () => {
     const refs = extractWikilinks('[[foo\nbar]]');
     expect(refs).toEqual([]);
   });
+
+  test('strips trailing backslash from target (markdown table pipe escape)', () => {
+    // Inside a markdown table: [[slug\|display]] is the only way to write a
+    // wikilink with display text without the bare | breaking the table cell.
+    const refs = extractWikilinks('| [[loans/ATH\\|Rambler Athens]] | $133M |');
+    expect(refs).toEqual([{ target: 'loans/ATH', display: 'Rambler Athens' }]);
+  });
 });
 
 describe('resolveWikilinkTarget', () => {
@@ -126,17 +133,65 @@ describe('resolveWikilinkTarget', () => {
     expect(await resolveWikilinkTarget(engine, 'scim')).toBe('vault/wiki/partners/scim');
   });
 
-  test('stays ambiguous when multiple vault/ hits exist', async () => {
+  test('stays ambiguous when multiple vault/ hits exist in same category', async () => {
+    // Same category (both under properties/) with no category-order fallback hit.
     const engine = mockEngine([
-      { slug: 'vault/wiki/properties/ATH' },
-      { slug: 'vault/wiki/loans/ATH' },
+      { slug: 'vault/wiki/properties/athens' },
+      { slug: 'vault/wiki/properties/atlanta' },
     ]);
-    expect(await resolveWikilinkTarget(engine, 'ATH')).toBeNull();
+    expect(await resolveWikilinkTarget(engine, 'athens', ['vault/wiki/properties/athens', 'vault/wiki/properties/atlanta'])).toBe('vault/wiki/properties/athens');
+    // But unique-suffix resolves the above. Genuine same-category ambiguity:
+    const engine2 = mockEngine([
+      { slug: 'vault/deals/value-add-acquisitions/lmk/budget' },
+      { slug: 'vault/deals/value-add-acquisitions/hts/budget' },
+    ]);
+    const slugs2 = ['vault/deals/value-add-acquisitions/lmk/budget', 'vault/deals/value-add-acquisitions/hts/budget'];
+    expect(await resolveWikilinkTarget(engine2, 'budget', slugs2)).toBeNull();
   });
 
   test('returns null when no match exists', async () => {
     const engine = mockEngine([{ slug: 'scim' }]);
     expect(await resolveWikilinkTarget(engine, 'nonexistent')).toBeNull();
+  });
+
+  test('sibling-match: source in loans/ prefers loans candidate', async () => {
+    const engine = mockEngine([
+      { slug: 'vault/wiki/properties/ath' },
+      { slug: 'vault/wiki/loans/ath' },
+    ]);
+    const slugs = ['vault/wiki/properties/ath', 'vault/wiki/loans/ath'];
+    expect(await resolveWikilinkTarget(engine, 'ATH', slugs, 'vault/wiki/loans/portfolio-summary'))
+      .toBe('vault/wiki/loans/ath');
+  });
+
+  test('sibling-match: source in properties/ prefers properties candidate', async () => {
+    const engine = mockEngine([
+      { slug: 'vault/wiki/properties/ath' },
+      { slug: 'vault/wiki/loans/ath' },
+    ]);
+    const slugs = ['vault/wiki/properties/ath', 'vault/wiki/loans/ath'];
+    expect(await resolveWikilinkTarget(engine, 'ATH', slugs, 'vault/wiki/properties/sw'))
+      .toBe('vault/wiki/properties/ath');
+  });
+
+  test('category-order fallback: bare [[ATH]] from gl-patterns -> properties', async () => {
+    const engine = mockEngine([
+      { slug: 'vault/wiki/properties/ath' },
+      { slug: 'vault/wiki/loans/ath' },
+    ]);
+    const slugs = ['vault/wiki/properties/ath', 'vault/wiki/loans/ath'];
+    expect(await resolveWikilinkTarget(engine, 'ATH', slugs, 'vault/wiki/gl-patterns/utilities'))
+      .toBe('vault/wiki/properties/ath');
+  });
+
+  test('category-order fallback: bare [[insurance]] prefers domains over gl-patterns', async () => {
+    const engine = mockEngine([
+      { slug: 'vault/wiki/domains/insurance' },
+      { slug: 'vault/wiki/gl-patterns/insurance' },
+    ]);
+    const slugs = ['vault/wiki/domains/insurance', 'vault/wiki/gl-patterns/insurance'];
+    expect(await resolveWikilinkTarget(engine, 'insurance', slugs, 'vault/wiki/properties/sw'))
+      .toBe('vault/wiki/domains/insurance');
   });
 
   test('uses provided slug index without calling listPages', async () => {
