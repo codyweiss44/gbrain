@@ -5,7 +5,12 @@ import { parseMarkdown } from './markdown.ts';
 import { chunkText } from './chunkers/recursive.ts';
 import { embedBatch } from './embedding.ts';
 import { slugifyPath } from './sync.ts';
+import { extractWikilinks, resolveWikilinkTarget } from './wikilinks.ts';
 import type { ChunkInput } from './types.ts';
+
+/** link_type tag used for auto-extracted wikilinks. Reconciliation only touches
+ * links with this type, so explicit add_link calls from agents are never clobbered. */
+const WIKILINK_TYPE = 'wikilink';
 
 export interface ImportResult {
   slug: string;
@@ -121,9 +126,63 @@ export async function importFromContent(
       // Content is empty — delete stale chunks so they don't ghost in search results
       await tx.deleteChunks(slug);
     }
+
+    await reconcileWikilinks(tx, slug, parsed.compiled_truth, parsed.timeline || '');
   });
 
   return { slug, status: 'imported', chunks: chunks.length };
+}
+
+/**
+ * Extract wikilinks from the page body, resolve them to concrete slugs, and
+ * diff against existing outgoing links of type 'wikilink'. Only auto-managed
+ * wikilinks are touched — explicit links added via add_link keep their own
+ * link_type and survive reconciliation untouched.
+ *
+ * Ambiguous or unresolvable targets are skipped (logged via console.warn).
+ * Self-links are skipped. Errors from addLink (e.g. target deleted mid-tx)
+ * are caught and logged rather than aborting the import.
+ */
+export async function reconcileWikilinks(
+  tx: BrainEngine,
+  slug: string,
+  compiledTruth: string,
+  timeline: string,
+  slugIndex?: string[],
+): Promise<void> {
+  const refs = [...extractWikilinks(compiledTruth), ...extractWikilinks(timeline)];
+
+  const desired = new Map<string, string>();
+  if (refs.length > 0) {
+    const index = slugIndex ?? ((await tx.listPages()) ?? []).map((p) => p.slug);
+    for (const ref of refs) {
+      const resolved = await resolveWikilinkTarget(tx, ref.target, index);
+      if (!resolved || resolved === slug) continue;
+      if (!desired.has(resolved)) {
+        desired.set(resolved, ref.display ?? ref.anchor ?? '');
+      }
+    }
+  }
+
+  const existing = (await tx.getLinks(slug)) ?? [];
+  const existingWikilinks = new Set(
+    existing.filter((l) => l.link_type === WIKILINK_TYPE).map((l) => l.to_slug),
+  );
+
+  for (const stale of existingWikilinks) {
+    if (!desired.has(stale)) {
+      await tx.removeLink(slug, stale);
+    }
+  }
+  for (const [toSlug, context] of desired.entries()) {
+    try {
+      await tx.addLink(slug, toSlug, context, WIKILINK_TYPE);
+    } catch (e) {
+      console.warn(
+        `[gbrain] wikilink skipped ${slug} -> ${toSlug}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
 }
 
 /**
